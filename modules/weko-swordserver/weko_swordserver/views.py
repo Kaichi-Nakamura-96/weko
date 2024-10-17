@@ -12,6 +12,9 @@ from __future__ import absolute_import, print_function
 from datetime import datetime, timedelta
 import shutil
 
+import hashlib
+import base64
+
 import sword3common
 from flask import Blueprint, current_app, jsonify, request, url_for
 from flask_login import current_user
@@ -31,6 +34,12 @@ from weko_workflow.utils import get_site_info_name
 
 from .decorators import *
 from .errors import *
+from .utils import(
+    check_import_file_format,
+    is_valid_body_hash,
+    check_bagit_import_items,
+    check_others_import_items
+)
 
 
 class SwordState:
@@ -65,12 +74,12 @@ def get_service_document():
     This request can be made against a root Service-URL, which will describe the capabilities of the entire server,
     for information about the full list of Service-URLs, or can be made against an individual Service-URL for information just about that service.
     """
-    
+
     """
     Server Requirements
         * If Authorization (and optionally On-Behalf-Of) headers are provided, MUST authenticate the request
     """
-    
+
     """
     Response Requirements
         * If Authorization (and optionally On-Behalf-Of) headers are provided, MUST only list Service-URLs in the Service Document for which a deposit request would be permitted
@@ -84,7 +93,7 @@ def get_service_document():
         * If the server does not allow this method in this context at this time, MAY respond with a 405 (MethodNotAllowed)
         * If the server does not support On-Behalf-Of deposit and the On-Behalf-Of header has been provided, MAY respond with a 412 (OnBehalfOfNotAllowed)
     """
-    
+
     """
     Set raw data to ServiceDocument
     """
@@ -174,7 +183,7 @@ def post_service_document():
         * If the server does not accept packages in the format identified in the Packaging header, MUST respond with a 415 (PackagingFormatNotAcceptable)
         * If the Packaging header does not match the format found in the body content, SHOULD return 415 (FormatHeaderMismatch). Note that the server may not be able to inspect the package during the request-response, so MAY NOT return this response.
     """
-    
+
     """
     Check content-disposition
         Request format:
@@ -195,7 +204,29 @@ def post_service_document():
     if file is None:
         raise WekoSwordserverException("Not found {0} in request body.".format(filename), ErrorType.BadRequest)
 
-    check_result = check_import_items(file, False)
+    # ここから分岐
+    # Check file format
+    packaging = request.headers.get('Packaging').split('/')[-1]
+    file_format = check_import_file_format(file, packaging)
+
+    if file_format == 'OTHERS':
+        check_result, registration_format = \
+            check_others_import_items(file, False)
+    else:
+        access_token = request.headers.get('Authorization').split('Bearer ')
+        header_info = {
+            'access_token': access_token
+        }
+
+        digest = request.headers.get('Digest')
+        body = request.data
+
+        if not is_valid_body_hash(digest, body):
+            raise WekoSwordserverException(
+                'Invalid Body Hash', ErrorType.BadRequest
+                )
+        check_result, registration_format = \
+            check_bagit_import_items(file, False)
     item = check_result.get('list_record')[0] if check_result.get('list_record') else None
     if check_result.get('error') or not item or item.get('errors'):
         errorType = None
@@ -210,14 +241,15 @@ def post_service_document():
             errorType = ErrorType.ContentMalformed
             check_result_msg = 'item_missing'
         raise WekoSwordserverException('Error in check_import_items: {0}'.format(check_result_msg), errorType)
+    # print(f"ステータス >> {item.get('status')}")  #同じファイルを入れようとすると'keep'になることを確認
     if item.get('status') != 'new':
-        raise WekoSwordserverException('This item is already registered: {0]'.format(item.get('item_title')), ErrorType.BadRequest)
+        raise WekoSwordserverException('This item is already registered: {0}'.format(item.get('item_title')), ErrorType.BadRequest)
 
     data_path = check_result.get("data_path","")
     expire = datetime.now() + timedelta(days=1)
     TempDirInfo().set(data_path, {"expire": expire.strftime("%Y-%m-%d %H:%M:%S")})
     item["root_path"] = data_path+"/data"
-    
+
     # import item
     owner = -1
     if current_user.is_authenticated:
@@ -232,10 +264,10 @@ def post_service_document():
     import_result = import_items_to_system(item, request_info=request_info)
     if not import_result.get('success'):
         raise WekoSwordserverException('Error in import_items_to_system: {0}'.format(item.get('error_id')), ErrorType.ServerError)
-    
+
     shutil.rmtree(data_path)
     TempDirInfo().delete(data_path)
-    
+
     recid = import_result.get('recid')
 
     return jsonify(_get_status_document(recid))
@@ -300,10 +332,10 @@ def _get_status_document(recid):
         permalink = record['system_identifier_doi'][
             'attribute_value_mlt'][0][
             'subitem_systemidt_identifier']
-    
+
     """
     Set raw data to StatusDocument
-    
+
     The following fields are set by sword3common
         # "@context"
         # "@type"
@@ -363,7 +395,7 @@ def _get_status_document(recid):
 @check_on_behalf_of()
 def delete_item(recid):
     """ Delete the Object in its entirety from the server, along with all Metadata and Files. """
-    
+
     """
     Server Requirements
         * If Authorization (and optionally On-Behalf-Of) headers are provided, MUST authenticate the request
@@ -384,7 +416,7 @@ def delete_item(recid):
         * If the server does not support On-Behalf-Of deposit and the On-Behalf-Of header has been provided, MAY respond with a 412 (OnBehalfOfNotAllowed)
     """
     try:
-        # delete item 
+        # delete item
         soft_delete(recid)
         current_app.logger.debug("item deleted by sword (recid={})".format(recid))
         db.session.commit()
@@ -394,7 +426,7 @@ def delete_item(recid):
     return ('', 204)
 
 def _create_error_document(type, error):
-    
+
     class Error(sword3common.Error):
         # fix to timestamp coerce function not defined
         __SEAMLESS_STRUCT__ = {
