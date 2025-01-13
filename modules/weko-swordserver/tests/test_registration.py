@@ -1,18 +1,27 @@
+# -*- coding: utf-8 -*-
+#
+# Copyright (C) 2024 National Institute of Informatics.
+#
+# WEKO-SWORDServer is free software; you can redistribute it and/or modify it
+# under the terms of the MIT License; see LICENSE file for more details.
+
 import copy
 import uuid
 import pytest
 from flask import json
 from flask_login.utils import login_user
-from mock import patch, MagicMock
-from unittest.mock import PropertyMock
+from unittest.mock import MagicMock, patch, PropertyMock
+from werkzeug.datastructures import FileStorage
 
 from invenio_files_rest.errors import FileSizeError
 from invenio_files_rest.models import Bucket, Location, ObjectVersion
 from invenio_pidstore.models import PersistentIdentifier
-from weko_swordserver.errors import ErrorType, WekoSwordserverException
-from weko_swordserver.registration import check_import_items, create_activity_from_jpcoar, create_file_info, upload_jpcoar_contents
 from weko_workflow.models import Activity, WorkFlow
 
+from weko_swordserver.errors import ErrorType, WekoSwordserverException
+from weko_swordserver.registration import check_import_items, create_activity_from_jpcoar, create_file_info, upload_jpcoar_contents, check_bagit_import_items
+
+from .helpers import json_data
 
 @pytest.fixture()
 def admin_tsv_settings(workflow):
@@ -23,7 +32,7 @@ def admin_tsv_settings(workflow):
                 "register_format": "Direct"
             },
             "XML": {
-                "workflow": str(workflow.id),
+                "workflow": str(workflow[0]["workflow"].id),
                 "register_format": "Workflow"
             }
         }
@@ -39,7 +48,7 @@ def admin_xml_settings(workflow):
                 "register_format": "Direct"
             },
             "XML": {
-                "workflow": str(workflow.id),
+                "workflow": str(workflow[0]["workflow"].id),
                 "register_format": "Workflow"
             }
         }
@@ -59,7 +68,7 @@ def test_check_import_items(app, admin_tsv_settings, admin_xml_settings):
         with patch("weko_swordserver.registration.check_tsv_import_items", return_value=check_tsv_result):
             check_result, register_format = check_import_items(sample_files)
             assert check_result == check_tsv_result
-            assert register_format == "Direct"
+            assert register_format == "TSV"
 
     # Case02: default_format = TSV but try import xml
     with patch("weko_admin.admin.AdminSettings.get", return_value=admin_tsv_settings):
@@ -67,7 +76,7 @@ def test_check_import_items(app, admin_tsv_settings, admin_xml_settings):
             with patch("weko_swordserver.registration.check_xml_import_items", return_value=check_xml_result):
                 check_result, register_format = check_import_items(sample_files)
                 assert check_result == check_xml_result
-                assert register_format == "Workflow"
+                assert register_format == "XML"
 
     # Case03: default_format = TSV and import error
     with patch("weko_admin.admin.AdminSettings.get", return_value=admin_tsv_settings):
@@ -82,7 +91,7 @@ def test_check_import_items(app, admin_tsv_settings, admin_xml_settings):
         with patch("weko_swordserver.registration.check_xml_import_items", return_value=check_xml_result):
             check_result, register_format = check_import_items(sample_files)
             assert check_result == check_xml_result
-            assert register_format == "Workflow"
+            assert register_format == "XML"
 
     # Case05: default_format = XML but try import tsv
     with patch("weko_admin.admin.AdminSettings.get", return_value=admin_xml_settings):
@@ -90,7 +99,7 @@ def test_check_import_items(app, admin_tsv_settings, admin_xml_settings):
             with patch("weko_swordserver.registration.check_tsv_import_items", return_value=check_tsv_result):
                 check_result, register_format = check_import_items(sample_files)
                 assert check_result == check_tsv_result
-                assert register_format == "Direct"
+                assert register_format == "TSV"
 
     # Case06: default_format = XML and import error
     with patch("weko_admin.admin.AdminSettings.get", return_value=admin_xml_settings):
@@ -384,3 +393,38 @@ def test_create_file_info(app, bucket, users, admin_xml_settings):
             }
             assert 'created' in actual
             assert 'updated' in actual
+
+
+# .tox/c1/bin/pytest --cov=weko_swordserver tests/test_registration.py -v -vv -s --cov-branch --cov-report=term --cov-report=html --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp --full-trace
+
+# def check_bagit_import_items(file, packaging):
+# .tox/c1/bin/pytest --cov=weko_swordserver tests/test_registration.py::test_check_bagit_import_items -v -vv -s --cov-branch --cov-report=term --cov-report=html --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp --full-trace
+def test_check_bagit_import_items(app,db,index,users,tokens,sword_mapping,sword_client,make_crate,mocker):
+    # sucsess case for publish_status is "public". It is required to scope "deposit:actions".
+    client_id = tokens[2]["client"].client_id
+
+    # mock_request = mocker.patch("weko_swordserver.registration.request")
+    with patch("weko_swordserver.registration.request") as mock_request:
+        mock_oauth = MagicMock()
+        mock_oauth.client.client_id = client_id
+        mock_oauth.access_token.scopes = tokens[2]["scope"].split(" ")
+        mock_request.oauth = mock_oauth
+
+        mapped_json = json_data("data/item_type/mapped_json_2.json")
+        mock_map = mocker.patch("weko_swordserver.mapper.WekoSwordMapper.map",return_value=mapped_json)
+
+        zip, _ = make_crate()
+        storage = FileStorage(filename="payload.zip",stream=zip)
+        packaging = "http://purl.org/net/sword/3.0/package/SimpleZip"
+
+        with app.test_request_context():
+            result = check_bagit_import_items(storage,packaging)
+
+        mock_map.assert_called_once()
+
+    assert result.get("data_path").startswith("/tmp/weko_import_")
+    assert result.get("register_format") == "Direct"
+    assert result.get("item_type_id") == 2
+    assert result.get("error") is None
+
+

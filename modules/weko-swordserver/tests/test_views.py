@@ -1,22 +1,27 @@
 
 import os
-from unittest.mock import MagicMock, PropertyMock
+import pytest
+import datetime
+from time import sleep
+from unittest.mock import MagicMock, PropertyMock, patch
 from flask import url_for,json,request,abort
 from flask_login.utils import login_user
-import pytest
-from mock import patch
-import datetime
+
 from sword3common.lib.seamless import SeamlessException
 from werkzeug.datastructures import FileStorage
 
 from invenio_accounts.testutils import login_user_via_session
 from invenio_pidstore.models import PersistentIdentifier
 from invenio_files_rest.models import Location
+from invenio_records.models import RecordMetadata
 
-from weko_swordserver.errors import *
+from weko_workflow.models import Activity
 
 from weko_swordserver.views import _get_status_workflow_document, blueprint, _get_status_document,_create_error_document,post_service_document
-from weko_workflow.models import Activity
+from weko_swordserver.views import blueprint, _get_status_document,_create_error_document,post_service_document
+
+from weko_swordserver.errors import *
+from .helpers import json_data, calculate_hash
 
 # .tox/c1/bin/pytest --cov=weko_swordserver tests/test_views.py -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp
 
@@ -24,7 +29,7 @@ from weko_workflow.models import Activity
 # .tox/c1/bin/pytest --cov=weko_swordserver tests/test_views.py::test_get_service_document -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp
 def test_get_service_document(client,users,tokens):
     login_user_via_session(client=client,email=users[0]["email"])
-    token = tokens["token"].access_token
+    token = tokens[0]["token"].access_token
     url = url_for("weko_swordserver.get_service_document")
     headers = {
         "Authorization":"Bearer {}".format(token),
@@ -35,8 +40,8 @@ def test_get_service_document(client,users,tokens):
 
 # def post_service_document():
 # .tox/c1/bin/pytest --cov=weko_swordserver tests/test_views.py::test_post_service_document -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp
-def test_post_service_document(app,client,db,users,esindex,location,index,make_zip,tokens,item_type,doi_identifier,mocker,admin_settings, workflow):
-    token=tokens["import_token"].access_token
+def test_post_service_document(app,client,db,users,esindex,location,index,make_zip,tokens,item_type,doi_identifier,mocker):
+    token=tokens[0]["token"].access_token
     url = url_for("weko_swordserver.post_service_document")
     headers = {
         "Authorization":"Bearer {}".format(token),
@@ -44,8 +49,8 @@ def test_post_service_document(app,client,db,users,esindex,location,index,make_z
         "Packaging":"http://purl.org/net/sword/3.0/package/SimpleZip"
     }
     def update_location_size():
-        from decimal import Decimal
-        loc = db.session.query(Location).filter(Location.id == 1).one()
+        loc = db.session.query(Location).filter(
+                    Location.id == 1).one()
         loc.size = 1547
     mocker.patch("weko_swordserver.views._get_status_document",side_effect=lambda x:{"recid":x})
     mocker.patch("weko_search_ui.utils.find_and_update_location_size",side_effect=update_location_size)
@@ -57,14 +62,14 @@ def test_post_service_document(app,client,db,users,esindex,location,index,make_z
         res = client.post(url, data=dict(file=storage),content_type="multipart/form-data",headers=headers)
         assert res.status_code == 200
 
-    #recid = PersistentIdentifier.get("recid","1").object_uuid
-    #record = RecordMetadata.query.filter_by(id=recid).one_or_none()
-    #assert record is not None
-    #record = record.json
-    #file_metadata = record["item_1617605131499"]["attribute_value_mlt"][0]
-    #assert file_metadata.get("url") is not None
-    #assert file_metadata.get("url").get("url") == "https://localhost/record/1/files/sample.html"
-        assert json.loads(res.data) == {"recid": 1 }
+    recid = PersistentIdentifier.get("recid","1").object_uuid
+    record = RecordMetadata.query.filter_by(id=recid).one_or_none()
+    assert record is not None
+    record = record.json
+    file_metadata = record["item_1617605131499"]["attribute_value_mlt"][0]
+    assert file_metadata.get("url") is not None
+    assert file_metadata.get("url").get("url") == "https://localhost/record/1/files/sample.html"
+    assert json.loads(res.data) == {"recid": 1 }
 
     expected_activity_id = "A-20240301-00001"
     activity = MagicMock(spec=Activity)
@@ -156,12 +161,127 @@ def test_post_service_document(app,client,db,users,esindex,location,index,make_z
                 assert e.errorType == ErrorType.ServerError
                 assert e.message == "Invalid register format has been set for admin setting"
 
+# def post_service_document():
+# .tox/c1/bin/pytest --cov=weko_swordserver tests/test_views.py::test_post_service_document_json_ld -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp
+def test_post_service_document_json_ld(app,client,db,users,esindex,location,index,make_crate,tokens,item_type,doi_identifier,sword_mapping,sword_client,mocker):
+    def update_location_size():
+        loc = db.session.query(Location).filter(
+                    Location.id == 1).one()
+        loc.size = 1547
+    mocker.patch("weko_swordserver.views._get_status_document",side_effect=lambda x:{"recid":x})
+    mocker.patch("weko_search_ui.utils.find_and_update_location_size",side_effect=update_location_size)
+    mocker.patch("weko_search_ui.utils.send_item_created_event_to_es")
+
+    token_direct = tokens[0]["token"].access_token
+    token_workflow = tokens[1]["token"].access_token
+    token_none = tokens[3]["token"].access_token
+    # Digest VERIFICATION ON
+    app.config["WEKO_SWORDSERVER_DIGEST_VERIFICATION"] = True
+
+    # Direct registration
+    url = url_for("weko_swordserver.post_service_document")
+    zip, _ = make_crate()
+    storage = FileStorage(filename="payload.zip",stream=zip)
+    mapped_json = json_data("data/item_type/mapped_json_2.json")
+    headers = {
+        "Authorization":"Bearer {}".format(token_direct),
+        "Content-Disposition":"attachment; filename=payload.zip",
+        "Packaging":"http://purl.org/net/sword/3.0/package/SimpleZip",
+        "Digest":"SHA-256={}".format(calculate_hash(storage))
+    }
+    # print("")
+    # print("Direct registration")
+    with patch("weko_swordserver.mapper.WekoSwordMapper.map",return_value=mapped_json):
+        with patch("weko_swordserver.registration.bagit.Bag.validate"):
+            res = client.post(url, data=dict(file=storage),content_type="multipart/form-data",headers=headers)
+        assert res.status_code == 200
+        recid = res.json["recid"]
+        recid = PersistentIdentifier.get("recid",recid)
+        record = RecordMetadata.query.filter_by(id=recid.object_uuid).one_or_none()
+        assert record is not None
+        record = record.json
+        file_metadata = record["item_1617604990215"]["attribute_value_mlt"][0]
+        assert file_metadata.get("url") is not None
+        assert file_metadata.get("url").get("url") == f"https://localhost/record/{recid.id}/files/sample.rst"
+
+
+    # invalid hash and be rejected
+    app.config["WEKO_SWORDSERVER_DIGEST_VERIFICATION"] = True
+    zip, _ = make_crate()
+    storage = FileStorage(filename="payload.zip",stream=zip)
+    mapped_json = json_data("data/item_type/mapped_json_2.json")
+    headers = {
+        "Authorization":"Bearer {}".format(token_direct),
+        "Content-Disposition":"attachment; filename=payload.zip",
+        "Packaging":"http://purl.org/net/sword/3.0/package/SimpleZip",
+        "Digest":"SHA-256=1NVAL1DHASHTEST"
+    }
+    with patch("weko_swordserver.mapper.WekoSwordMapper.map",return_value=mapped_json):
+        with patch("weko_swordserver.registration.bagit.Bag.validate"):
+            res = client.post(url, data=dict(file=storage),content_type="multipart/form-data",headers=headers)
+        assert res.status_code == 412
+        assert res.json.get("@type") == "DigestMismatch"
+        assert res.json.get("error") == "Request body and digest verification failed."
+
+
+    # invalid hash but setting is off
+    app.config["WEKO_SWORDSERVER_DIGEST_VERIFICATION"] = False
+
+
+    # invalid Content-Length
+    app.config["WEKO_SWORDSERVER_CONTENT_LENGTH"] = False
+
+    # invalid Content-Length and be rejected
+    app.config["WEKO_SWORDSERVER_CONTENT_LENGTH"] = True
+
+    # print("Workflow registration")
+    app.config["WEKO_SWORDSERVER_CONTENT_LENGTH"] = False
+    # mocker.patch("weko_swordserver.views._get_status_workflow_document",side_effect=lambda a,x:{"activity":a.id,"recid":x})
+
+    # Workflow registration
+    zip, _ = make_crate()
+    storage = FileStorage(filename="payload.zip",stream=zip)
+    headers = {
+        "Authorization":"Bearer {}".format(token_workflow),
+        "Content-Disposition":"attachment; filename=payload.zip",
+        "Packaging":"http://purl.org/net/sword/3.0/package/SimpleZip",
+        "Digest":"SHA-256={}".format(calculate_hash(storage))
+    }
+    mapped_json = json_data("data/item_type/mapped_json_2.json")
+    with patch("weko_swordserver.mapper.WekoSwordMapper.map",return_value=mapped_json):
+        with patch("weko_swordserver.registration.bagit.Bag.validate"):
+            res = client.post(url, data=dict(file=storage),content_type="multipart/form-data",headers=headers)
+        assert res.status_code == 200
+        recid = res.json["recid"]
+        recid = PersistentIdentifier.get("recid",recid)
+        record = RecordMetadata.query.filter_by(id=recid.object_uuid).one_or_none()
+        assert record is not None
+        record = record.json
+        file_metadata = record["item_1617604990215"]["attribute_value_mlt"][0]
+        assert file_metadata.get("url") is not None
+        # assert file_metadata.get("url").get("url") == f"https://localhost/record/{recid.id}/files/sample.rst"
+
+    # no scopes
+    zip, _  = make_crate()
+    storage = FileStorage(filename="payload.zip",stream=zip)
+    headers = {
+        "Authorization":"Bearer {}".format(token_none),
+        "Content-Disposition":"attachment; filename=payload.zip",
+        "Packaging":"http://purl.org/net/sword/3.0/package/SimpleZip",
+        "Digest":"SHA-256={}".format(calculate_hash(storage))
+    }
+    mapped_json = json_data("data/item_type/mapped_json_2.json")
+    with patch("weko_swordserver.mapper.WekoSwordMapper.map",return_value=mapped_json):
+        with patch("weko_swordserver.registration.bagit.Bag.validate"):
+            res = client.post(url, data=dict(file=storage),content_type="multipart/form-data",headers=headers)
+        assert res.status_code == 403
+
 
 # def get_status_document(recid):
 # .tox/c1/bin/pytest --cov=weko_swordserver tests/test_views.py::test__get_status_document -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp
 def test_get_status_document(client, users, tokens):
     login_user_via_session(client=client,email=users[0]["email"])
-    token = tokens["token"].access_token
+    token = tokens[0]["token"].access_token
     url = url_for("weko_swordserver.get_status_document",recid="test_recid")
     headers = {
         "Authorization":"Bearer {}".format(token),
@@ -169,7 +289,7 @@ def test_get_status_document(client, users, tokens):
     with patch("weko_swordserver.views._get_status_document",side_effect=lambda x:{"recid":x}):
         res = client.get(url, headers=headers)
         assert res.status_code == 200
-        assert json.loads(res.data) == {"recid":"test_recid"}
+        assert res.json == {"recid":"test_recid"}
 
 
 # def _get_status_document(recid):
@@ -178,7 +298,7 @@ def test__get_status_document(app,records):
     recid_doi = records[0][0].pid_value
     recid_not_doi = records[2][0].pid_value
     recid_sysdoi = records[3][0].pid_value
-    
+
     test_doi = {
         "@context": "https://swordapp.github.io/swordv3/swordv3.jsonld",
         "@type": "Status",
@@ -260,15 +380,15 @@ def test__get_status_document(app,records):
         # exist permalink
         result = _get_status_document(recid_doi)
         assert result == test_doi
-        
+
         # not exist permalink
         result = _get_status_document(recid_not_doi)
         assert result == test_not_doi
-        
+
         # exist system_identifier_doi
         result = _get_status_document(recid_sysdoi)
         assert result == test_sysdoi
-        
+
         # raise WekoSwordserverException
         with pytest.raises(WekoSwordserverException) as e:
             _get_status_document("not_exist_recid")
@@ -352,13 +472,13 @@ def test__get_status_workflow_document(app, records):
 # .tox/c1/bin/pytest --cov=weko_swordserver tests/test_views.py::test_delete_item -vv -s --cov-branch --cov-report=term --basetemp=/code/modules/weko-swordserver/.tox/c1/tmp
 def test_delete_item(client, tokens, users,es_records):
     login_user_via_session(client=client,email=users[0]["email"])
-    token = tokens["token"].access_token
+    token = tokens[0]["token"].access_token
     delete_item = es_records[0][0].pid_value
     url = url_for("weko_swordserver.delete_item",recid=delete_item)
     headers = {
         "Authorization":"Bearer {}".format(token),
     }
-    
+
     res = client.delete(url, headers=headers)
     assert res.status_code == 204
     target = PersistentIdentifier.query.filter_by(pid_type="recid",pid_value=delete_item).first()
@@ -403,7 +523,7 @@ def test_handle_unauthorized(client,sessionlifetime):
     with patch("weko_swordserver.views._create_error_document",side_effect=lambda x,y:{"type":x,"msg":y}):
         res = client.get(url)
         assert res.status_code == 401
-        assert json.loads(res.data) == {"type":"AuthenticationRequired","msg":"Authentication is required."}
+        assert res.json == {"type":"AuthenticationRequired","msg":"Authentication is required."}
 
 
 # def handle_forbidden(ex):
@@ -413,7 +533,7 @@ def test_handle_forbidden(client,sessionlifetime):
     with patch("weko_swordserver.views._create_error_document",side_effect=lambda x,y:{"type":x,"msg":y}):
         res = client.get(url)
         assert res.status_code == 403
-        assert json.loads(res.data) == {"type":"Forbidden","msg":"Not allowed operation in your token scope."}
+        assert res.json == {"type":"Forbidden","msg":"Not allowed operation in your token scope."}
 
 
 # def handle_seamless_exception(ex):
@@ -423,7 +543,7 @@ def test_handle_seamless_exception(client,sessionlifetime):
     with patch("weko_swordserver.views._create_error_document",side_effect=lambda x,y:{"type":x,"msg":y}):
         res = client.get(url)
         assert res.status_code == 500
-        assert json.loads(res.data) == {"type":"ServerError","msg":"this is test SeamlessException"}
+        assert res.json == {"type":"ServerError","msg":"this is test SeamlessException"}
 
 
 # def handle_exception(ex):
@@ -433,7 +553,7 @@ def test_handle_exception(client,sessionlifetime):
     with patch("weko_swordserver.views._create_error_document",side_effect=lambda x,y:{"type":x,"msg":y}):
         res = client.get(url)
         assert res.status_code == 500
-        assert json.loads(res.data) == {"type":"ServerError","msg":"Internal Server Error"}
+        assert res.json == {"type":"ServerError","msg":"Internal Server Error"}
 
 
 # def handle_weko_swordserver_exception(ex):
@@ -443,4 +563,4 @@ def test_handle_weko_swordserver_exception(client,sessionlifetime):
     with patch("weko_swordserver.views._create_error_document",side_effect=lambda x,y:{"type":x,"msg":y}):
         res = client.get(url)
         assert res.status_code == 400
-        assert json.loads(res.data) == {"type":"BadRequest","msg":"this is test BadRequest exception"}
+        assert res.json == {"type":"BadRequest","msg":"this is test BadRequest exception"}
