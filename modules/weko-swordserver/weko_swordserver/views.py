@@ -318,7 +318,7 @@ def post_service_document():
         TempDirInfo().delete(data_path)
 
     current_app.logger.info(
-        f"item imported by sword from {request.oauth.client.name} (recid={recid})"
+        f"item(recid={recid} imported by sword from user={request.oauth.client.user_id})"
     )
     return response
 

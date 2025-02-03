@@ -50,7 +50,7 @@ from weko_search_ui.utils import (
     handle_validate_item_import
 )
 from weko_workflow.api import WorkFlow, WorkActivity
-from weko_workflow.models import ActionStatusPolicy, WorkFlow
+from weko_workflow.models import ActionStatusPolicy
 
 from .errors import ErrorType, WekoSwordserverException
 from .mapper import WekoSwordMapper
@@ -70,7 +70,7 @@ def check_import_items(file, is_change_identifier: bool = False):
         if check_tsv_result.get("error"):
             # try xml
             workflow_id = int(data_format.get("XML", {}).get("workflow", "-1"))
-            workflow = WorkFlow.query.get(workflow_id)
+            workflow = WorkFlow().get_workflow_by_id(workflow_id)
             if not workflow or workflow.is_deleted:
                 raise WekoSwordserverException("Workflow is not configured for importing xml.", ErrorType.ServerError)
             item_type_id = workflow.itemtype_id
@@ -85,7 +85,7 @@ def check_import_items(file, is_change_identifier: bool = False):
             return check_tsv_result, "TSV"
     elif default_format == "XML":
         workflow_id = int(data_format.get("XML", {}).get("workflow", "-1"))
-        workflow = WorkFlow.query.get(workflow_id)
+        workflow = WorkFlow().get_workflow_by_id(workflow_id)
         if not workflow or workflow.is_deleted:
             raise WekoSwordserverException("Workflow is not configured for importing xml.", ErrorType.ServerError)
         item_type_id = workflow.itemtype_id
@@ -104,6 +104,47 @@ def check_import_items(file, is_change_identifier: bool = False):
 
     return {}, None
 
+
+def import_items_to_activity(check_result, data_path, user_id):
+    workflow_id = check_result.get("workflow_id")
+    # when metadata format was XML, get id from admin setting
+    if workflow_id is None:
+        settings = AdminSettings.get("sword_api_setting", dict_to_object=False)
+        default_format = settings.get("default_format", "XML")
+        data_format = settings.get("data_format")
+        workflow_id = int(data_format.get(default_format, {}).get("workflow", "-1"))
+
+    metadata = check_result.get("list_record")[0].get("metadata")
+    publish_status = check_result.get("list_record")[0].get("publish_status")
+    index = metadata.get("path")
+    files_info = metadata.pop("files_info", [{}])
+    files = [
+        os.join(data_path, file_info.get("url", {}).get("label"))
+            for file_info
+            in files_info[0].get("items", {})
+    ]
+    comment = metadata.get("comment")
+    link_data = check_result.get("list_record")[0].get("link_data")
+    grant_data = check_result.get("list_record")[0].get("grant_data")
+
+    try:
+        from weko_workflow.headless import HeadlessActivity
+        headless = HeadlessActivity()
+        url, current_action, recid = headless.auto(
+            user_id=user_id, workflow_id=workflow_id,
+            index=index, metadata=metadata, files=files, comment=comment,
+            link_data=link_data, grant_data=grant_data
+        )
+    except Exception as ex:
+        traceback.print_exc()
+        raise WekoSwordserverException(
+            f"An error occurred while {headless.current_action}.",
+            ErrorType.ServerError
+        ) from ex
+
+    return url, recid, current_action
+
+
 def create_activity_from_jpcoar(check_result, data_path):
     deposit = {}
     workflow_id = check_result.get("workflow_id")
@@ -112,7 +153,7 @@ def create_activity_from_jpcoar(check_result, data_path):
         default_format = settings.get("default_format", "XML")
         data_format = settings.get("data_format")
         workflow_id = int(data_format.get(default_format, {}).get("workflow", "-1"))
-    workflow = WorkFlow.query.filter_by(id=workflow_id).first()
+    workflow = WorkFlow().get_workflow_by_id(workflow_id)
     workflow_data = {
         "flow_id": workflow.flow_id,
         "workflow_id": workflow.id,
@@ -399,8 +440,10 @@ def check_bagit_import_items(file, packaging):
             json_ld = json.load(f)
 
         processed_json = process_json(json_ld)
-        # FIXME: if workflow registration, check if the indextree is valid
-        indextree = processed_json.get("record").get("header").get("indextree")
+        if register_format == "Workflow" and workflow.index_tree_id is not None:
+            processed_json.get("record").get("header").update({
+                "indextree": workflow.index_tree_id
+            })
         # if workflow.index_tree_id is None
 
         list_record = generate_metadata_from_json(
@@ -424,6 +467,14 @@ def check_bagit_import_items(file, packaging):
 
         handle_check_file_metadata(list_record, data_path)
 
+        # TODO: get again files_list from metadata
+        # files_info = metadata.pop("files_info", [{}])
+        # files_list  = [
+        #     os.join(data_path, file_info.get("url", {}).get("label"))
+        #         for file_info
+        #         in files_info[0].get("items", {})
+        # ]
+
         # add zip file to temporary dictionary
         if current_app.config.get("WEKO_SWORDSERVER_DEPOSIT_DATASET"):
             if isinstance(file, str):
@@ -431,13 +482,15 @@ def check_bagit_import_items(file, packaging):
             else:
                 file.seek(0, 0)
                 file.save(os.path.join(data_path, "data", filename))
-            files_list.append(f"data/{filename}")
+            # FIXME: not add but replace with zipfile
+            files_list.append(f"{filename}")
 
         handle_files_info(list_record, files_list, data_path, filename)
 
         # add on-behalf-of user id to metadata
         if shared_id is not None:
             list_record[0].get("metadata").update({"weko_shared_id": shared_id})
+            list_record[0].get("metadata").update({"shared_user_id": shared_id})
 
         check_result.update({"list_record": list_record})
 
@@ -494,7 +547,7 @@ def generate_metadata_from_json(json, mapping, item_type, is_change_identifier=F
     Args:
         json (dict): Json data including metadata.
         mapping (dict): Mapping definition.
-        item_type_id (int): ItemType ID used for registration.
+        item_type (`ItemType`): ItemType record object used for registration.
         is_change_identifier (bool, optional):
             Change Identifier Mode. Defaults to False.
 
@@ -522,7 +575,7 @@ def generate_metadata_from_json(json, mapping, item_type, is_change_identifier=F
 
     return list_record
 
-def handle_files_info(list_record, files_list, data_path, filename):
+def handle_files_info(list_record, files_list, data_path, filename=None):
     """ Handle files_info in metadata.
 
     Handle metadata for Direct registration and Workflow registration.
@@ -551,7 +604,10 @@ def handle_files_info(list_record, files_list, data_path, filename):
     file_metadata = metadata.get(key)  # for Direct registration
 
     # add dataset zip file's info to files_info if dataset will be deposited.
-    if current_app.config.get("WEKO_SWORDSERVER_DEPOSIT_DATASET"):
+    if (
+        filename is not None
+        or current_app.config.get("WEKO_SWORDSERVER_DEPOSIT_DATASET")
+    ):
         dataset_info = {
             "filesize": [
                 {
@@ -563,9 +619,10 @@ def handle_files_info(list_record, files_list, data_path, filename):
             "url": {
                 "url": "",
                 "objectType": "fulltext",
-                "label": f"data/{filename}"
+                "label": f"{filename}"
             },
         }
+        # FIXME: not add but replace with zipfile
         files_info[0].get("items").append(dataset_info)
         file_metadata.append(dataset_info)
 

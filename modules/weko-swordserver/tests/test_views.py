@@ -16,7 +16,7 @@ from invenio_files_rest.models import Location
 from invenio_records.models import RecordMetadata
 
 from weko_workflow.models import Activity
-from weko_search_ui.utils import check_import_items, handle_check_date, handle_check_exist_record, import_items_to_system
+from weko_search_ui.utils import handle_check_date, handle_check_exist_record, import_items_to_system
 
 from weko_swordserver.registration import check_bagit_import_items, generate_metadata_from_json
 from weko_swordserver.views import _get_status_workflow_document, blueprint, _get_status_document,_create_error_document,post_service_document
@@ -55,6 +55,7 @@ def test_get_service_document(client,users,tokens):
 def test_post_service_document(app,client,db,users,esindex,location,index,make_zip,tokens,item_type,doi_identifier,mocker,sword_mapping,sword_client):
     login_user_via_session(client=client,email=users[0]["email"])
     token_direct = tokens[0]["token"].access_token
+    token_workflow = tokens[1]["token"].access_token
     url = url_for("weko_swordserver.post_service_document")
     headers = {
         "Authorization":"Bearer {}".format(token_direct),
@@ -96,7 +97,7 @@ def test_post_service_document(app,client,db,users,esindex,location,index,make_z
             content_type="application/zip",
         )
         headers2 = {
-            "Authorization":"Bearer {}".format(token),
+            "Authorization":"Bearer {}".format(token_workflow),
             "Content-Disposition":"attachment; filename=sample_file_jpcoar_xml.zip",
             "Packaging":"http://purl.org/net/sword/3.0/package/SimpleZip"
         }
