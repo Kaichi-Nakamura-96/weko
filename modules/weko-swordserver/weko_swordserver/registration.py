@@ -105,8 +105,8 @@ def check_import_items(file, is_change_identifier: bool = False):
     return {}, None
 
 
-def import_items_to_activity(check_result, data_path, user_id):
-    workflow_id = check_result.get("workflow_id")
+def import_items_to_activity(item, data_path, request_info):
+    workflow_id = request_info.get("workflow_id")
     # when metadata format was XML, get id from admin setting
     if workflow_id is None:
         settings = AdminSettings.get("sword_api_setting", dict_to_object=False)
@@ -114,24 +114,24 @@ def import_items_to_activity(check_result, data_path, user_id):
         data_format = settings.get("data_format")
         workflow_id = int(data_format.get(default_format, {}).get("workflow", "-1"))
 
-    metadata = check_result.get("list_record")[0].get("metadata")
-    publish_status = check_result.get("list_record")[0].get("publish_status")
+    metadata = item.get("metadata")
+    publish_status = item.get("publish_status")
     index = metadata.get("path")
     files_info = metadata.pop("files_info", [{}])
     files = [
-        os.join(data_path, file_info.get("url", {}).get("label"))
+        os.path.join(item.get("root_path"), file_info.get("url", {}).get("label"))
             for file_info
             in files_info[0].get("items", {})
     ]
     comment = metadata.get("comment")
-    link_data = check_result.get("list_record")[0].get("link_data")
-    grant_data = check_result.get("list_record")[0].get("grant_data")
+    link_data = item.get("link_data")
+    grant_data = item.get("grant_data")
 
     try:
         from weko_workflow.headless import HeadlessActivity
         headless = HeadlessActivity()
         url, current_action, recid = headless.auto(
-            user_id=user_id, workflow_id=workflow_id,
+            user_id= request_info.get("user_id"), workflow_id=workflow_id,
             index=index, metadata=metadata, files=files, comment=comment,
             link_data=link_data, grant_data=grant_data
         )
@@ -421,7 +421,7 @@ def check_bagit_import_items(file, packaging):
                     "Item type and workflow do not match.",
                     errorType=ErrorType.ServerError
                 )
-
+            check_result.update({"workflow_id": workflow.id})
         check_result.update({"register_format": register_format})
 
         item_type = ItemTypes.get_by_id(sword_mapping.item_type_id)
@@ -457,7 +457,7 @@ def check_bagit_import_items(file, packaging):
         handle_check_and_prepare_publish_status(list_record)
 
         # check if the user has scopes to publish
-        required_scopes = set([actions_scope.id])
+        required_scopes = {actions_scope.id}
         token_scopes = set(request.oauth.access_token.scopes)
         if (
             list_record[0].get("publish_status") == "public"
@@ -564,7 +564,7 @@ def generate_metadata_from_json(json, mapping, item_type, is_change_identifier=F
         "metadata": metadata,
         "item_type_name": item_type.item_type_name.name,
         "item_type_id": item_type.id,
-        "publish_status": metadata.pop("publish_status"),
+        "publish_status": metadata.get("publish_status"),
     })
     handle_set_change_identifier_flag(list_record, is_change_identifier)
     handle_fill_system_item(list_record)
@@ -595,7 +595,6 @@ def handle_files_info(list_record, files_list, data_path, filename=None):
     for file in files_list:
         if file.startswith("data/") and file != "data/":
             target_files_list.append(file.split("data/")[1])
-    if target_files_list:
         list_record[0].update({"file_path":target_files_list})
 
     metadata = list_record[0].get("metadata")
@@ -606,7 +605,7 @@ def handle_files_info(list_record, files_list, data_path, filename=None):
     # add dataset zip file's info to files_info if dataset will be deposited.
     if (
         filename is not None
-        or current_app.config.get("WEKO_SWORDSERVER_DEPOSIT_DATASET")
+        and current_app.config.get("WEKO_SWORDSERVER_DEPOSIT_DATASET")
     ):
         dataset_info = {
             "filesize": [

@@ -41,7 +41,8 @@ from .errors import ErrorType, WekoSwordserverException
 from .registration import (
     check_bagit_import_items,
     check_import_items as check_others_import_items,
-    create_activity_from_jpcoar
+    create_activity_from_jpcoar,
+    import_items_to_activity
 )
 from .utils import check_import_file_format, is_valid_file_hash
 
@@ -285,34 +286,35 @@ def post_service_document():
             "referrer": request.referrer,
             "hostname": request.host,
             "user_id": owner,
-            "action": "IMPORT"
+            "action": "IMPORT",
+            "workflow_id": check_result.get("workflow_id"),
     }
     response = {}
     if file_format == "TSV" or file_format == "JSON" and register_format == "Direct":
-
-        item["root_path"] = os.path.join(data_path, "data")
-
         import_result = import_items_to_system(item, request_info=request_info)
         if not import_result.get("success"):
             raise WekoSwordserverException("Error in import_items_to_system: {0}".format(import_result.get("error_id")), ErrorType.ServerError)
         recid = import_result.get("recid")
         response = jsonify(_get_status_document(recid))
     elif file_format == "XML" or file_format == "JSON" and register_format == "Workflow":
-        required_scopes = set([activity_scope.id])
+        required_scopes = {activity_scope.id}
         token_scopes = set(request.oauth.access_token.scopes)
         if not required_scopes.issubset(token_scopes):
             abort(403)
         try:
-            activity, recid = create_activity_from_jpcoar(check_result, data_path)
+            # activity, recid = create_activity_from_jpcoar(check_result, data_path)
+            url, recid, aution = import_items_to_activity(item, data_path, request_info=request_info)
+            activity = url.split("/")[-1]
         except:
             traceback.print_exc()
-            raise WekoSwordserverException("Error in create_activity_from_jpcoar", ErrorType.ServerError)
+            raise WekoSwordserverException("An error occurred while import to activity", ErrorType.ServerError)
         response = jsonify(_get_status_workflow_document(activity, recid))
     else:
         if os.path.exists(data_path):
             shutil.rmtree(data_path)
             TempDirInfo().delete(data_path)
         raise WekoSwordserverException("Invalid register format has been set for admin setting", ErrorType.ServerError)
+    # FIXME: add finaly block
     if os.path.exists(data_path):
         shutil.rmtree(data_path)
         TempDirInfo().delete(data_path)
