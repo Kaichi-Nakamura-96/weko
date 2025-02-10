@@ -13,15 +13,18 @@ from invenio_oaiharvester.harvester import JsonMapper
 
 from .errors import WekoSwordserverException, ErrorType
 
+from weko_search_ui.mapper import JsonLdMapper
+
 
 class WekoSwordMapper(JsonMapper):
     """WekoSwordMapper."""
-    def __init__(self, json, itemtype, json_map):
+    def __init__(self, json, json_ld, itemtype, json_map):
         """Init."""
         self.json = json
         self.itemtype = itemtype
         self.itemtype_name = itemtype.item_type_name.name
         self.json_map = json_map
+        self.all_properties = JsonLdMapper.process_json_ld(json_ld)
 
     def map(self):
         """Maping JSON-LD;self.json Metadata into item_type format."""
@@ -58,6 +61,7 @@ class WekoSwordMapper(JsonMapper):
             dict: mapped metadata
         """
         metadata = {}
+        path_and_value = {}
 
         # Create metadata for each item in json_map
         for k, v in self.json_map.items():
@@ -66,6 +70,17 @@ class WekoSwordMapper(JsonMapper):
                 continue
             type_of_item_type_path = self._get_type_of_item_type_path(item_map[k])
             self._create_metadata_of_a_property(metadata, item_map[k], type_of_item_type_path, json_value)
+
+            # Create path_and_value
+            path_and_value[v] = json_value
+
+        # Create Extra field
+        extra_dict = self._get_extra_dict(path_and_value, self.all_properties)
+
+        # Check if "Extra" prepared in itemtype schema form item_map
+        if "Extra" in item_map:
+            metadata["Extra"] = extra_dict
+
         return metadata
 
 
@@ -428,6 +443,49 @@ class WekoSwordMapper(JsonMapper):
         # If lst is not empty, return 1 + dimensions of lst[0]
         else:
             return 1 + self._get_dimensions(lst[0])
+
+
+    # TODO: Add methods for extra area.
+    def _get_extra_dict(self, path_and_value, all_properties):
+        """_summary_
+
+        Args:
+            path_and_value (dict): dict contains pairs of path of JSON metadata and a value or list of values
+            all_properties (dict): dict contains pairs of path of JSON metadata and a value
+
+        Returns:
+            dict: dict to be Extra field
+        """
+        import re
+
+        list_pop_keys = []
+
+        for k, v in all_properties.items():
+            # case that '[' is included in the key.
+            if '[' in k:
+                # get indices of '[' and ']'
+                indice = [int(i) for i in re.findall(r'\[(\d)+\]', k)]
+                # get key name without '[' and ']'
+                key = re.sub(r'\[\d+\]', '', k)
+                if key in path_and_value.keys():
+                    # get value from path_and_value
+                    value = path_and_value
+                    for idx in indice:
+                        try:
+                            value = value[key][idx]
+                        except:
+                            value = None
+                    if value:
+                        list_pop_keys.append(k)
+            # case that NO '[' is included in the key.
+            else:
+                if k in path_and_value.keys():
+                    list_pop_keys.append(k)
+
+        for k in list_pop_keys:
+            all_properties.pop(k)
+
+        return all_properties
 
 
     def is_valid_mapping(self):
