@@ -25,6 +25,8 @@ import os
 import shutil
 import tempfile
 import uuid
+import xml.etree.ElementTree as ET
+import xmltodict
 from datetime import date, datetime, timedelta
 from os.path import join
 from time import sleep
@@ -33,6 +35,7 @@ import requests
 from elasticsearch import Elasticsearch
 from elasticsearch.exceptions import RequestError
 from flask import Flask, url_for
+from flask.cli import ScriptInfo
 from flask_babelex import Babel
 from flask_babelex import lazy_gettext as _
 from flask_celeryext import FlaskCeleryExt
@@ -47,6 +50,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from werkzeug.local import LocalProxy
+from invenio_records.api import Record
+from invenio_stats.processors import EventsIndexer
 from tests.helpers import create_record, json_data
 
 from invenio_access import InvenioAccess
@@ -59,7 +64,6 @@ from invenio_assets import InvenioAssets
 from invenio_cache import InvenioCache
 from invenio_communities import InvenioCommunities
 from invenio_communities.models import Community
-from invenio_communities.views.ui import blueprint as invenio_communities_blueprint
 from invenio_db import InvenioDB
 from invenio_db import db as db_
 from invenio_db.utils import drop_alembic_version_table
@@ -100,7 +104,7 @@ from invenio_pidrelations.contrib.records import RecordDraft
 from invenio_pidrelations.contrib.versioning import PIDVersioning
 from invenio_pidrelations.models import PIDRelation
 from invenio_pidstore import InvenioPIDStore, current_pidstore
-from invenio_pidstore.models import PersistentIdentifier, PIDStatus, Redirect
+from invenio_pidstore.models import PersistentIdentifier, PIDStatus, RecordIdentifier
 from invenio_pidstore.providers.recordid import RecordIdProvider
 from invenio_queues.proxies import current_queues
 from invenio_records import InvenioRecords
@@ -140,24 +144,30 @@ from weko_records import WekoRecords
 from weko_records.api import ItemsMetadata, ItemTypes, Mapping
 from weko_records.config import WEKO_ITEMTYPE_EXCLUDED_KEYS
 from weko_records.models import ItemType, ItemTypeMapping, ItemTypeName
+from weko_records.serializers.utils import get_full_mapping
 from weko_records_ui.config import (
     EMAIL_DISPLAY_FLG,
     WEKO_PERMISSION_ROLE_COMMUNITY,
     WEKO_PERMISSION_SUPER_ROLE_USER,
     WEKO_RECORDS_UI_BULK_UPDATE_FIELDS,
 )
-from weko_records_ui.models import PDFCoverPageSettings
+from weko_records_ui.models import PDFCoverPageSettings, RocrateMapping
 from weko_redis.redis import RedisConnection
 from weko_schema_ui.models import OAIServerSchema
 from weko_theme import WekoTheme
 from weko_theme.config import THEME_BODY_TEMPLATE, WEKO_THEME_ADMIN_ITEM_MANAGEMENT_INIT_TEMPLATE
-from weko_theme.views import blueprint as weko_theme_blueprint
 from weko_workflow import WekoWorkflow
 from weko_workflow.models import Action, ActionStatus, ActionStatusPolicy, Activity, FlowAction, FlowDefine, WorkFlow
 from weko_search_ui import WekoSearchREST, WekoSearchUI
 from weko_search_ui.config import SEARCH_UI_SEARCH_INDEX, WEKO_SEARCH_TYPE_DICT, WEKO_SEARCH_UI_BASE_TEMPLATE, WEKO_SEARCH_KEYWORDS_DICT
 from weko_search_ui.rest import create_blueprint
 from weko_search_ui.views import blueprint_api
+
+
+from invenio_oaiharvester.models import OAIHarvestConfig, HarvestSettings
+
+
+
 
 # from moto import mock_s3
 
@@ -251,7 +261,6 @@ def base_app(instance_path, search_class, request):
         instance_path=instance_path,
         static_folder=join(instance_path, "static"),
     )
-    WEKO_INDEX_TREE_REST_ENDPOINTS = copy.deepcopy(_WEKO_INDEX_TREE_REST_ENDPOINTS)
     os.environ["INVENIO_WEB_HOST_NAME"] = "127.0.0.1"
     app_.config.update(
         ACCOUNTS_JWT_ENABLE=True,
@@ -352,7 +361,10 @@ def base_app(instance_path, search_class, request):
                     fields=["year"],
                 )
             ),
-            "test-weko": {"test-weko": {"fields": [1,2,3], "nested": 1}}
+            "test-weko": {
+                "test-weko": {"fields": [1,2,3], "nested": 1},
+                'controlnumber': {'title': 'ID', 'fields': ['control_number'], 'default_order': 'asc', 'order': 2,}
+            },
         },
         FILES_REST_DEFAULT_MAX_FILE_SIZE=None,
         WEKO_ADMIN_ENABLE_LOGIN_INSTRUCTIONS=False,
@@ -624,6 +636,8 @@ def base_app(instance_path, search_class, request):
                     "application/json": ("weko_records.serializers" ":json_v1_search"),
                 },
                 index_route="/index/",
+                search_api_route="/<string:version>/records",
+                search_result_list_route="/<string:version>/records/list",
                 tree_route="/index",
                 item_tree_route="/index/<string:pid_value>",
                 index_move_route="/index/move/<int:index_id>",
@@ -632,20 +646,7 @@ def base_app(instance_path, search_class, request):
                 max_result_window=10000,
             ),
         ),
-        WEKO_INDEX_TREE_REST_ENDPOINTS=dict(
-            tid=dict(
-                record_class="weko_index_tree.api:Indexes",
-                index_route="/tree/index/<int:index_id>",
-                tree_route="/tree",
-                item_tree_route="/tree/<string:pid_value>",
-                index_move_route="/tree/move/<int:index_id>",
-                default_media_type="application/json",
-                create_permission_factory_imp="weko_index_tree.permissions:index_tree_permission",
-                read_permission_factory_imp="weko_index_tree.permissions:index_tree_permission",
-                update_permission_factory_imp="weko_index_tree.permissions:index_tree_permission",
-                delete_permission_factory_imp="weko_index_tree.permissions:index_tree_permission",
-            )
-        ),
+        WEKO_INDEX_TREE_REST_ENDPOINTS=copy.deepcopy(_WEKO_INDEX_TREE_REST_ENDPOINTS),
         WEKO_INDEX_TREE_STYLE_OPTIONS={
             "id": "weko",
             "widths": ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"],
@@ -714,7 +715,9 @@ def base_app(instance_path, search_class, request):
     # search.register_mappings(search_class.Meta.index, 'mock_module.mappings')
     InvenioRecordsREST(app_)
     app_.register_blueprint(create_blueprint_from_app(app_))
+    from weko_theme.views import blueprint as weko_theme_blueprint
     app_.register_blueprint(weko_theme_blueprint)
+    from invenio_communities.views.ui import blueprint as invenio_communities_blueprint
     app_.register_blueprint(invenio_communities_blueprint)
 
     current_assets = LocalProxy(lambda: app_.extensions["invenio-assets"])
@@ -1907,9 +1910,9 @@ def db_activity(db, db_records2, db_itemtype, db_workflow, users):
 
 @pytest.fixture()
 def db_itemtype(app, db, make_itemtype):
-    itemtype_id = 1
+    itemtype_id = 1000
     itemtype_data = {
-        "name": "テストアイテムタイプ",
+        "name": "テストアイテムタイプ_" + str(itemtype_id),
         "schema": "tests/data/itemtype_schema.json",
         "form": "tests/data/itemtype_form.json",
         "render": "tests/data/itemtype_render.json",
@@ -3937,3 +3940,35 @@ def make_itemtype(app,db):
         
         return result
     return factory
+
+
+@pytest.fixture()
+def db_rocrate_mapping(db):
+    item_type_name = ItemTypeName(id=40001, name='test item type', has_site_license=True, is_active=True)
+    with db.session.begin_nested():
+        db.session.add(item_type_name)
+    db.session.commit()
+
+    item_type = ItemType(
+        id=40001,
+        name_id=40001,
+        harvesting_type=True,
+        schema={'type': 'test schema'},
+        form={'type': 'test form'},
+        render={'type': 'test render'},
+        tag=1,
+        version_id=1,
+        is_deleted=False,
+    )
+
+    with db.session.begin_nested():
+        db.session.add(item_type)
+    db.session.commit()
+
+    with open('tests/data/rocrate/rocrate_mapping.json', 'r') as f:
+        mapping = json.load(f)
+    rocrate_mapping = RocrateMapping(item_type_id=40001, mapping=mapping)
+
+    with db.session.begin_nested():
+        db.session.add(rocrate_mapping)
+    db.session.commit()

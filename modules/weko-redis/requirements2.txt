@@ -176,7 +176,6 @@ passlib==1.7.1
 pbr==5.11.1
 pexpect==4.3.0
 pickleshare==0.7.4
-Pillow==5.4.1
 platformdirs==2.4.0
 pluggy==0.13.1
 ply==3.11
@@ -201,7 +200,7 @@ pyzmq==17.0.0
 redis==2.10.6
 requests==2.18.4
 requests-oauthlib==1.1.0
-resync==1.0.9
+resync==2.0.1
 s3fs==0.1.6
 s3transfer==0.1.13
 Sickle==0.6.4

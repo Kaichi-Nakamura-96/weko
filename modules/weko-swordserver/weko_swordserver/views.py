@@ -11,9 +11,10 @@ from __future__ import absolute_import, print_function
 
 import os
 import shutil
+import traceback
 from datetime import datetime, timedelta
 
-from flask import Blueprint, current_app, jsonify, request, url_for
+from flask import Blueprint, current_app, jsonify, request, url_for, abort
 from flask_login import current_user
 from sword3common import (
     ServiceDocument, StatusDocument, constants, Error as sword3commonError
@@ -24,6 +25,7 @@ from werkzeug.http import parse_options_header
 from invenio_db import db
 from invenio_deposit.scopes import write_scope
 from invenio_oaiserver.api import OaiIdentify
+from invenio_oauth2server import require_api_auth
 from invenio_oauth2server.decorators import require_oauth_scopes
 from invenio_oauth2server.ext import verify_oauth_token_and_set_current_user
 from invenio_oauth2server.provider import oauth2
@@ -32,12 +34,15 @@ from weko_admin.api import TempDirInfo
 from weko_records_ui.utils import get_record_permalink, soft_delete
 from weko_search_ui.utils import import_items_to_system
 from weko_workflow.utils import get_site_info_name
+from weko_workflow.scopes import activity_scope
 
 from .decorators import check_on_behalf_of, check_package_contents
 from .errors import ErrorType, WekoSwordserverException
 from .registration import (
     check_bagit_import_items,
-    check_import_items as check_others_import_items
+    check_import_items as check_others_import_items,
+    create_activity_from_jpcoar,
+    import_items_to_activity
 )
 from .utils import check_import_file_format, is_valid_file_hash
 
@@ -221,7 +226,7 @@ def post_service_document():
 
     if file_format == "JSON":
         digest = request.headers.get("Digest")
-        if current_app.config['WEKO_SWORDSERVER_DIGEST_VERIFICATION']:
+        if current_app.config["WEKO_SWORDSERVER_DIGEST_VERIFICATION"]:
             if (
                 digest is None
                 or not digest.startswith("SHA-256=")
@@ -281,27 +286,43 @@ def post_service_document():
             "referrer": request.referrer,
             "hostname": request.host,
             "user_id": owner,
-            "action": "IMPORT"
+            "action": "IMPORT",
+            "workflow_id": check_result.get("workflow_id"),
     }
+    response = {}
+    if file_format == "TSV" or file_format == "JSON" and register_format == "Direct":
+        import_result = import_items_to_system(item, request_info=request_info)
+        if not import_result.get("success"):
+            raise WekoSwordserverException("Error in import_items_to_system: {0}".format(import_result.get("error_id")), ErrorType.ServerError)
+        recid = import_result.get("recid")
+        response = jsonify(_get_status_document(recid))
+    elif file_format == "XML" or file_format == "JSON" and register_format == "Workflow":
+        required_scopes = {activity_scope.id}
+        token_scopes = set(request.oauth.access_token.scopes)
+        if not required_scopes.issubset(token_scopes):
+            abort(403)
+        try:
+            # activity, recid = create_activity_from_jpcoar(check_result, data_path)
+            url, recid, aution = import_items_to_activity(item, data_path, request_info=request_info)
+            activity = url.split("/")[-1]
+        except:
+            traceback.print_exc()
+            raise WekoSwordserverException("An error occurred while import to activity", ErrorType.ServerError)
+        response = jsonify(_get_status_workflow_document(activity, recid))
+    else:
+        if os.path.exists(data_path):
+            shutil.rmtree(data_path)
+            TempDirInfo().delete(data_path)
+        raise WekoSwordserverException("Invalid register format has been set for admin setting", ErrorType.ServerError)
+    # FIXME: add finaly block
+    if os.path.exists(data_path):
+        shutil.rmtree(data_path)
+        TempDirInfo().delete(data_path)
 
-    import_result = import_items_to_system(item, request_info=request_info)
-    if not import_result.get("success"):
-        current_app.logger.error(
-            f"Error in import_items_to_system: {item.get('error_id')}"
-        )
-        raise WekoSwordserverException("Error in import_items_to_system: {0}".format(item.get("error_id")), ErrorType.ServerError)
-
-    # remove temp dir
-    shutil.rmtree(data_path)
-    TempDirInfo().delete(data_path)
-
-    recid = import_result.get("recid")
     current_app.logger.info(
-        f"item imported by sword from {request.oauth.client.name} (recid={recid})"
+        f"item(recid={recid} imported by sword from user={request.oauth.client.user_id})"
     )
-
-    return jsonify(_get_status_document(recid))
-
+    return response
 
 @blueprint.route("/deposit/<recid>", methods=["GET"])
 @oauth2.require_oauth()
@@ -421,6 +442,69 @@ def _get_status_document(recid):
 
     return statusDocument.data
 
+def _get_status_workflow_document(activity, recid):
+    """
+    :param recid: Record Identifier.
+    :returns: A :class:`sword3common.StatusDocument` instance.
+    """
+
+    """
+    Set raw data to StatusDocument
+
+    The following fields are set by sword3common
+        # "@context"
+        # "@type"
+    """
+    if not activity:
+        raise WekoSwordserverException("Activity created, but not found.", ErrorType.NotFound)
+
+    # Get record uri
+    record_url = ""
+    if recid:
+        record_url = url_for("weko_swordserver.get_status_document", recid=recid, _external=True)
+
+    raw_data = {
+        "@id": record_url,
+        "@context": constants.JSON_LD_CONTEXT,
+        "@type": constants.DocumentType.ServiceDocument,
+        "actions" : {
+            "getMetadata" : False,      # Not implimented
+            "getFiles" : False,         # Not implimented
+            "appendMetadata" : False,   # Not implimented
+            "appendFiles" : False,      # Not implimented
+            "replaceMetadata" : False,  # Not implimented
+            "replaceFiles" : False,     # Not implimented
+            "deleteMetadata" : False,   # Not implimented
+            "deleteFiles" : False,      # Not implimented
+            "deleteObject" : True,
+        },
+        "fileSet" : {
+            # "@id" : "",
+            # "eTag" : ""
+        },
+        "metadata" : {
+            # "@id" : "",
+            # "eTag" : ""
+        },
+        "service" : url_for("weko_swordserver.get_service_document", _external=False),
+        "state" : [
+            {
+                "@id" : SwordState.inWorkflow,
+                "description" : ""
+            }
+        ],
+        "links" : [
+            {
+                "@id" : url_for("weko_workflow.display_activity", activity_id=activity.activity_id, _external=True),
+                "rel" : ["alternate"],
+                "contentType" : "text/html"
+            },
+        ]
+    }
+
+    statusDocument = StatusDocument(raw=raw_data)
+
+    return statusDocument.data
 
 @blueprint.route("/deposit/<recid>", methods=["DELETE"])
 @oauth2.require_oauth()

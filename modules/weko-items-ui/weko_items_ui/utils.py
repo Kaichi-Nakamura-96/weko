@@ -20,6 +20,7 @@
 
 """Module of weko-items-ui utils.."""
 
+import calendar
 import copy
 import csv
 import json
@@ -39,8 +40,10 @@ from redis import sentinel
 from elasticsearch.exceptions import NotFoundError
 from elasticsearch import exceptions as es_exceptions
 from flask import abort, current_app, flash, redirect, request, send_file, \
-    url_for,jsonify
+    url_for,jsonify, Flask
 from flask_babelex import gettext as _
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from flask_login import current_user
 from invenio_accounts.models import Role, userrole
 from invenio_db import db
@@ -69,6 +72,7 @@ from weko_index_tree.utils import check_index_permissions, get_index_id, \
 from weko_records.api import FeedbackMailList, ItemTypes, Mapping
 from weko_records.serializers.utils import get_item_type_name
 from weko_records.utils import replace_fqdn_of_file_metadata
+from weko_records_ui.errors import AvailableFilesNotFoundRESTError
 from weko_records_ui.permissions import check_created_id, \
     check_file_download_permission, check_publish_status
 from weko_redis.redis import RedisConnection
@@ -1604,6 +1608,7 @@ def validate_form_input_data(
     remove_excluded_items_in_json_schema(item_id, json_schema)
 
     data['$schema'] = json_schema.copy()
+    
     validation_data = RecordBase(data)
 
     try:
@@ -1914,16 +1919,19 @@ def make_stats_file(item_type_id, recids, list_item_role, export_path=""):
     """
     from weko_records_ui.views import escape_newline, escape_str
 
-    item_type = ItemTypes.get_by_id(item_type_id).render
-    list_hide = get_item_from_option(item_type_id)
+    item_type = ItemTypes.get_by_id(item_type_id)
+    if item_type:
+        list_hide = get_item_from_option(item_type_id, item_type=ItemTypes(item_type.schema, model=item_type))
+    else:
+        list_hide = get_item_from_option(item_type_id)
     no_permission_show_hide = hide_meta_data_for_role(
         list_item_role.get(item_type_id))
-    if no_permission_show_hide and item_type and item_type.get('table_row'):
+    if no_permission_show_hide and item_type and item_type.render.get('table_row'):
         for name_hide in list_hide:
-            item_type['table_row'] = hide_table_row(
-                item_type.get('table_row'), name_hide)
+            item_type.render['table_row'] = hide_table_row(
+                item_type.render.get('table_row'), name_hide)
 
-    table_row_properties = item_type['table_row_map']['schema'].get(
+    table_row_properties = item_type.render['table_row_map']['schema'].get(
         'properties')
 
     class RecordsManager:
@@ -2128,10 +2136,11 @@ def make_stats_file(item_type_id, recids, list_item_role, export_path=""):
                             str(idx)))
                         key_label.insert(0, '.ファイルパス[{}]'.format(
                             str(idx)))
-                        file_path = ""
+                        output_path = ""
                         if key_data[key_index]:
                             file_path = "recid_{}/{}".format(str(self.cur_recid), key_data[key_index])
-                        key_data.insert(0,file_path)
+                            output_path = file_path if os.path.exists(os.path.join(export_path,file_path)) else ""
+                        key_data.insert(0,output_path)
                         break
                     elif 'thumbnail_label' in key_list[key_index] \
                             and len(item_key_split) == 2:
@@ -2239,7 +2248,7 @@ def make_stats_file(item_type_id, recids, list_item_role, export_path=""):
             pubdate = record.get('pubdate', {}).get('attribute_value', '')
             records.attr_output[recid].append(pubdate)
 
-    for item_key in item_type.get('table_row'):
+    for item_key in item_type.render.get('table_row'):
         item = table_row_properties.get(item_key)
         records.get_max_ins(item_key)
         keys = []
@@ -2295,9 +2304,9 @@ def make_stats_file(item_type_id, recids, list_item_role, export_path=""):
     ret_option = []
     multiple_option = ['.metadata.path', '.pos_index',
                        '.feedback_mail', '.file_path', '.thumbnail_path']
-    meta_list = item_type.get('meta_list', {})
-    meta_list.update(item_type.get('meta_fix', {}))
-    form = item_type.get('table_row_map', {}).get('form', {})
+    meta_list = item_type.render.get('meta_list', {})
+    meta_list.update(item_type.render.get('meta_fix', {}))
+    form = item_type.render.get('table_row_map', {}).get('form', {})
     del_num = 0
     total_col = len(ret)
     for index in range(total_col):
@@ -2616,8 +2625,11 @@ def _export_item(record_id,
         if not records_data:
             records_data = record
         if exported_item['item_type_id']:
-            list_hidden = get_ignore_item_from_mapping(
-                exported_item['item_type_id'])
+            item_type_id = exported_item['item_type_id']
+            list_hidden = []
+            item_type = ItemTypes.get_by_id(item_type_id)
+            if item_type:
+                list_hidden = get_ignore_item_from_mapping(item_type_id, item_type)
             if records_data.get('metadata'):
                 meta_data = records_data.get('metadata')
                 _custom_export_metadata(meta_data.get('_item_metadata', {}),
@@ -3146,15 +3158,17 @@ def hide_meta_data_for_role(record):
     return is_hidden
 
 
-def get_ignore_item_from_mapping(_item_type_id):
+def get_ignore_item_from_mapping(_item_type_id, item_type):
     """Get ignore item from mapping.
 
     :param _item_type_id:
+    :param item_type:
     :return ignore_list:
     """
     ignore_list = []
-    meta_options, item_type_mapping = get_options_and_order_list(_item_type_id)
-    sub_ids = get_hide_list_by_schema_form(item_type_id=_item_type_id)
+    meta_options, item_type_mapping = get_options_and_order_list(
+        _item_type_id, item_type_data=ItemTypes(item_type.schema, model=item_type))
+    sub_ids = get_hide_list_by_schema_form(item_type=item_type)
     for key, val in meta_options.items():
         hidden = val.get('option').get('hidden')
         if hidden:
@@ -3242,12 +3256,11 @@ def del_hide_sub_item(key, mlt, hide_list):
     else:
         pass
 
-def get_hide_list_by_schema_form(item_type_id=None, schemaform=None):
+def get_hide_list_by_schema_form(item_type=None, schemaform=None):
     """Get hide list by schema form."""
     ids = []
-    if item_type_id and not schemaform:
-        item_type = ItemTypes.get_by_id(item_type_id).render
-        schemaform = item_type.get('table_row_map', {}).get('form', {})
+    if item_type and not schemaform:
+        schemaform = item_type.render.get('table_row_map', {}).get('form', {})
     if schemaform:
         for item in schemaform:
             if not item.get('items'):
@@ -3258,16 +3271,15 @@ def get_hide_list_by_schema_form(item_type_id=None, schemaform=None):
     return ids
 
 
-def get_hide_parent_keys(item_type_id=None, meta_list=None):
+def get_hide_parent_keys(item_type=None, meta_list=None):
     """Get all hide parent keys.
 
-    :param item_type_id:
+    :param item_type:
     :param meta_list:
     :return: hide parent keys
     """
-    if item_type_id and not meta_list:
-        item_type = ItemTypes.get_by_id(item_type_id).render
-        meta_list = item_type.get('meta_list', {})
+    if item_type and not meta_list:
+        meta_list = item_type.render.get('meta_list', {})
     hide_parent_keys = []
     for key, val in meta_list.items():
         hidden = val.get('option', {}).get('hidden')
@@ -3283,18 +3295,18 @@ def get_hide_parent_and_sub_keys(item_type):
     """
     # Get parent keys of 'Hide' items.
     meta_list = item_type.render.get('meta_list', {})
-    hide_parent_key = get_hide_parent_keys(item_type.id, meta_list)
+    hide_parent_key = get_hide_parent_keys(item_type, meta_list)
     # Get sub keys of 'Hide' items.
     forms = item_type.render.get('table_row_map', {}).get('form', {})
-    hide_sub_keys = get_hide_list_by_schema_form(item_type.id, forms)
+    hide_sub_keys = get_hide_list_by_schema_form(item_type, forms)
     hide_sub_keys = [prop.replace('[]', '') for prop in hide_sub_keys]
     return hide_parent_key, hide_sub_keys
 
 
-def get_item_from_option(_item_type_id):
+def get_item_from_option(_item_type_id, item_type=None):
     """Get all keys of properties that is set Hide option on metadata."""
     ignore_list = []
-    meta_options = get_options_list(_item_type_id)
+    meta_options = get_options_list(_item_type_id, json_item=item_type)
     for key, val in meta_options.items():
         hidden = val.get('option').get('hidden')
         if hidden:
@@ -3309,15 +3321,17 @@ def get_options_list(item_type_id, json_item=None):
     :param json_item:
     :return: options dict
     """
+    meta_options = {}
     if json_item is None:
         json_item = ItemTypes.get_record(item_type_id)
-    meta_options = json_item.model.render.get('meta_fix')
-    meta_options.update(json_item.model.render.get('meta_list'))
+    if json_item:
+        meta_options = json_item.model.render.get('meta_fix')
+        meta_options.update(json_item.model.render.get('meta_list'))
     return meta_options
 
 
 def get_options_and_order_list(item_type_id, item_type_mapping=None,
-                               item_type_data=None):
+                               item_type_data=None, mapping_flag=True):
     """Get Options by item type id.
 
     :param item_type_id:
@@ -3330,9 +3344,13 @@ def get_options_and_order_list(item_type_id, item_type_mapping=None,
     item_type_mapping = None
     if item_type_id:
         meta_options = get_options_list(item_type_id, item_type_data)
-        if item_type_mapping is None:
+        if item_type_mapping is None and mapping_flag:
             item_type_mapping = Mapping.get_record(item_type_id)
-    return meta_options, item_type_mapping
+
+    if mapping_flag:
+        return meta_options, item_type_mapping
+    else:
+        return meta_options
 
 
 def hide_table_row(table_row, hide_key):
@@ -3831,24 +3849,22 @@ def hide_thumbnail(schema_form):
             break
 
 
-def get_ignore_item(_item_type_id, item_type_mapping=None,
-                    item_type_data=None):
+def get_ignore_item(_item_type_id, item_type_data=None):
     """Get ignore item from mapping.
 
     :param _item_type_id:
-    :param item_type_mapping:
     :param item_type_data:
     :return ignore_list:
     """
     ignore_list = []
-    meta_options, _ = get_options_and_order_list(
-        _item_type_id, item_type_mapping, item_type_data)
+    sub_ids = []
+    meta_options = get_options_and_order_list(
+        _item_type_id, item_type_data=item_type_data, mapping_flag=False)
     schema_form = None
     if item_type_data is not None:
         schema_form = item_type_data.model.render.get("table_row_map", {}).get(
             'form')
-    sub_ids = get_hide_list_by_schema_form(
-        item_type_id=_item_type_id, schemaform=schema_form)
+        sub_ids = get_hide_list_by_schema_form(schemaform=schema_form)
     for key, val in meta_options.items():
         hidden = val.get('option').get('hidden')
         if hidden:
@@ -4138,10 +4154,11 @@ def make_stats_file_with_permission(item_type_id, recids,
                             str(idx)))
                         key_label.insert(0, '.ファイルパス[{}]'.format(
                             str(idx)))
-                        file_path = ""
+                        output_path = ""
                         if key_data[key_index]:
                             file_path = "recid_{}/{}".format(str(self.cur_recid), key_data[key_index])
-                        key_data.insert(0,file_path)
+                            output_path = file_path if os.path.exists(os.path.join(export_path,file_path)) else ""
+                        key_data.insert(0,output_path)
                         break
                     elif 'thumbnail_label' in key_list[key_index] \
                             and len(item_key_split) == 2:
@@ -4459,3 +4476,92 @@ def has_permission_edit_item(record, recid):
     ).first()
     can_edit = True if pid == get_record_without_version(pid) else False
     return can_edit and permission
+
+
+def create_limmiter():
+    from .config import WEKO_ITEMS_UI_API_LIMIT_RATE_DEFAULT
+    return Limiter(app=Flask(__name__), key_func=get_remote_address, default_limits=WEKO_ITEMS_UI_API_LIMIT_RATE_DEFAULT)
+
+def get_file_download_data(item_id, record, filenames, query_date=None, size=None):
+    """Get file download data.
+
+    Args:
+        item_id (int): Item id
+        record (WekoRecord): Record
+        filenames (list[str]): Filenames
+        query_date (str): Period(yyyy-MM)
+        size (str): Ranking display number
+
+    Returns:
+        dict: Ranking result dict
+    """
+    result = {}
+
+    # Check available
+    available_filenames = []
+    target_files = [f for f in record.files if f.info().get('filename') in filenames]
+
+    for file in target_files:
+        if check_file_download_permission(record, file.info()):
+            available_filenames.append(file.info().get('filename'))
+    if not available_filenames:
+        raise AvailableFilesNotFoundRESTError()
+
+    result['ranking'] = [{'filename': f, 'download_total': 0} for f in available_filenames]
+
+    # Get root file ids
+    from invenio_files_rest.models import ObjectVersion
+    root_file_id_list = []
+    bucket_id = record.get('_buckets', {}).get('deposit')
+
+    for filename in available_filenames:
+        obv = ObjectVersion.get(bucket_id, filename)
+        root_file_id_list.append(str(obv.root_file_id) if obv else '')
+
+    # Set parameter
+    params = {
+        'item_id': str(item_id),
+        'root_file_id_list': root_file_id_list,
+    }
+
+    if query_date:
+        year = int(query_date[0: 4])
+        month = int(query_date[5: 7])
+        _, lastday = calendar.monthrange(year, month)
+        params.update({
+            'start_date': f'{query_date}-01',
+            'end_date': f'{query_date}-{str(lastday).zfill(2)}T23:59:59'
+        })
+
+    try:
+        try:
+            from invenio_stats.proxies import current_stats
+            # file download query
+            query_download_total_cfg = current_stats.queries['item-file-download-aggs']
+            query_download_total = query_download_total_cfg.query_class(**query_download_total_cfg.query_config)
+            res_download_total = query_download_total.run(**params)
+        except Exception as e:
+            current_app.logger.error(traceback.print_exc())
+            res_download_total = {'download_ranking': {'buckets': []}}
+
+        for b in res_download_total.get('download_ranking', {}).get('buckets'):
+            for r in result['ranking']:
+                if r.get('filename') == b.get('key'):
+                    r['download_total'] = b.get('doc_count')
+                    break
+
+        # Sort
+        result['ranking'].sort(key=lambda x:x['download_total'], reverse=True)
+        if size:
+            result['ranking'] = result['ranking'][:int(size)]
+
+    except Exception as e:
+        current_app.logger.error(traceback.print_exc())
+        current_app.logger.debug(e)
+
+    if query_date:
+        result['period'] = query_date
+    else:
+        result['period'] = 'total'
+
+    return result
