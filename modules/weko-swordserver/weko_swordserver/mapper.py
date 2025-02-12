@@ -75,7 +75,7 @@ class WekoSwordMapper(JsonMapper):
             path_and_value[v] = json_value
 
         # Create Extra field
-        extra_dict = self._get_extra_dict(path_and_value, self.all_properties)
+        extra_dict, _ = self._get_extra_dict(path_and_value, self.all_properties)
 
         # Check if "Extra" prepared in itemtype schema form item_map
         if "Extra" in item_map:
