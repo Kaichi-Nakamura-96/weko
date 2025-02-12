@@ -24,7 +24,7 @@ class WekoSwordMapper(JsonMapper):
         self.itemtype = itemtype
         self.itemtype_name = itemtype.item_type_name.name
         self.json_map = json_map
-        self.all_properties = JsonLdMapper.process_json_ld(json_ld)
+        self.all_properties, _ = JsonLdMapper.process_json_ld(json_ld)
 
     def map(self):
         """Maping JSON-LD;self.json Metadata into item_type format."""
@@ -75,7 +75,7 @@ class WekoSwordMapper(JsonMapper):
             path_and_value[v] = json_value
 
         # Create Extra field
-        extra_dict, _ = self._get_extra_dict(path_and_value, self.all_properties)
+        extra_dict = self._get_extra_dict(path_and_value, self.all_properties)
 
         # Check if "Extra" prepared in itemtype schema form item_map
         if "Extra" in item_map:
