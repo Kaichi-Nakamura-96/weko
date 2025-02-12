@@ -447,7 +447,7 @@ class WekoSwordMapper(JsonMapper):
 
     # TODO: Add methods for extra area.
     def _get_extra_dict(self, path_and_value, all_properties):
-        """_summary_
+        """Get dict of Extra field.
 
         Args:
             path_and_value (dict): dict contains pairs of path of JSON metadata and a value or list of values
