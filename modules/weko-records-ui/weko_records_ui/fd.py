@@ -224,7 +224,7 @@ def file_ui(
     # Extract file from record.
     filename = kwargs.get('filename')
     print("filename_before",filename)
-    filename = urllib.parse.quote(filename, safe='')
+    filename = urllib.parse.unquote(filename)
     print("filename_after",filename)
     fileobj = _record_file_factory(
         # pid, record, kwargs.get('filename')
@@ -431,7 +431,7 @@ def file_download_onetime(pid, record, _record_file_factory=None, **kwargs):
     token = request.args.get('token', type=str)
     filename = kwargs.get("filename")
     print("filename_before",filename)
-    filename = urllib.parse.quote(filename, safe='')
+    filename = urllib.parse.unquote(filename)
     print("filename_after",filename)
     error_template = "weko_theme/error.html"
     # Parse token
@@ -542,7 +542,7 @@ def file_download_secret(pid, record, _record_file_factory=None, **kwargs):
     token = request.args.get('token', type=str)
     filename:str = str(kwargs.get("filename"))
     print("filename_before",filename)
-    filename = urllib.parse.quote(filename, safe='')
+    filename = urllib.parse.unquote(filename)
     print("filename_after",filename)
     error_template = "weko_theme/error.html"
     # Parse token
