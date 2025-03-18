@@ -256,6 +256,8 @@ def post_service_document():
 
     else:
         check_result, file_format = check_import_items(file, False)
+        if file_format == "TSV/CSV":
+            register_type = check_result.get("register_type")
     data_path = check_result.get("data_path","")
     expire = datetime.now() + timedelta(days=1)
     TempDirInfo().set(data_path, {"expire": expire.strftime("%Y-%m-%d %H:%M:%S")})

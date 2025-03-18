@@ -81,6 +81,7 @@ def check_import_items(file, is_change_identifier: bool = False):
             else:
                 return check_xml_result, "XML"
         else:
+            handle_check_tsv_register_format(check_tsv_result)
             return check_tsv_result, "TSV/CSV"
     elif default_format == "XML":
         workflow_id = int(data_format.get("XML", {}).get("workflow", "-1"))
@@ -97,6 +98,7 @@ def check_import_items(file, is_change_identifier: bool = False):
             if check_tsv_result.get("error"):
                 return check_xml_result, None
             else:
+                handle_check_tsv_register_format(check_tsv_result)
                 return check_tsv_result, "TSV/CSV"
         else:
             return check_xml_result, "XML"
@@ -626,3 +628,29 @@ def handle_files_info(list_record, files_list, data_path, filename):
         file_metadata.append(dataset_info)
 
     return list_record
+
+def handle_check_tsv_register_format(check_result):
+    """Handle check tsv register format.
+
+    Check the format of the TSV file to be registered.
+
+    Args:
+        check_result (dict): Check result.
+
+    Returns:
+        dict: Check result.
+    """
+    item_type_id = check_result["list_record"][0].get("item_type_id")
+    workflow = WorkFlows()
+    workflow = workflow.get_workflow_by_item_type_id(item_type_id)
+    if workflow is None:
+        check_result.update({
+            "register_type": "Direct"
+        })
+    else:
+        check_result.update({
+            "register_type": "Workflow",
+            "workflow_id": workflow.id
+        })
+
+    return
