@@ -27,6 +27,7 @@ import os
 import shutil
 import tempfile
 import unicodedata
+import urllib
 from datetime import datetime
 
 from flask import abort, current_app, render_template, request, send_file
@@ -221,8 +222,13 @@ def file_ui(
     """
     _record_file_factory = _record_file_factory or record_file_factory
     # Extract file from record.
+    filename = kwargs.get('filename')
+    print("filename_before",filename)
+    filename = urllib.parse.quote(filename, safe='')
+    print("filename_after",filename)
     fileobj = _record_file_factory(
-        pid, record, kwargs.get('filename')
+        # pid, record, kwargs.get('filename')
+        pid, record, filename
     )
 
     if not fileobj:
@@ -424,6 +430,9 @@ def file_download_onetime(pid, record, _record_file_factory=None, **kwargs):
     """
     token = request.args.get('token', type=str)
     filename = kwargs.get("filename")
+    print("filename_before",filename)
+    filename = urllib.parse.quote(filename, safe='')
+    print("filename_after",filename)
     error_template = "weko_theme/error.html"
     # Parse token
     error, token_data = \
@@ -491,7 +500,7 @@ def file_download_onetime(pid, record, _record_file_factory=None, **kwargs):
 def _is_terms_of_use_only(file_obj:dict , req :dict) -> bool:
     """
         return true if the user can apply and apply workflow is terms_of_use_only
-        in case of terms_of_use_only download terms of use is agreed (or terms of use is not setted) 
+        in case of terms_of_use_only download terms of use is agreed (or terms of use is not setted)
     Args
         dict:file_obj :file object
         dict:req :request.args
@@ -518,7 +527,7 @@ def _is_terms_of_use_only(file_obj:dict , req :dict) -> bool:
 
         if workflow_id != "" :
             break
-    
+
     return is_terms_of_use_only(workflow_id) if workflow_id != "" else False
 
 def file_download_secret(pid, record, _record_file_factory=None, **kwargs):
@@ -532,6 +541,9 @@ def file_download_secret(pid, record, _record_file_factory=None, **kwargs):
     """
     token = request.args.get('token', type=str)
     filename:str = str(kwargs.get("filename"))
+    print("filename_before",filename)
+    filename = urllib.parse.quote(filename, safe='')
+    print("filename_after",filename)
     error_template = "weko_theme/error.html"
     # Parse token
     error, token_data = \
@@ -545,7 +557,7 @@ def file_download_secret(pid, record, _record_file_factory=None, **kwargs):
 
     if isinstance(date,str):
         date = datetime.strptime(date, "%Y-%m-%dT%H:%M:%S.%f")
-    
+
     # Get secret download record.
     secret_download :FileSecretDownload = get_secret_download(
         file_name=filename, record_id=pid.pid_value, id=id , created=date
@@ -558,7 +570,7 @@ def file_download_secret(pid, record, _record_file_factory=None, **kwargs):
     is_valid, error = validate_secret_download_token(
         secret_download, filename, pid.pid_value, id, date.isoformat(), secret_token)
     current_app.logger.debug("is_valid: {}, error: {}".format(is_valid,error))
-    
+
     if not is_valid:
         return render_template(error_template, error=error)
 
