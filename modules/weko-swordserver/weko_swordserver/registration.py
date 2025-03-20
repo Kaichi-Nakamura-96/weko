@@ -45,7 +45,8 @@ from weko_search_ui.utils import (
     handle_set_change_identifier_flag,
     handle_validate_item_import,
     handle_check_authors_prefix,
-    handle_check_authors_affiliation
+    handle_check_authors_affiliation,
+    handle_doi
 )
 from weko_workflow.api import WorkActivity, WorkFlow as WorkFlows
 from weko_workflow.models import ActionStatusPolicy, WorkFlow
@@ -445,6 +446,15 @@ def check_jsonld_import_items(
                 # >  cnri, doi_ra, doi
             } for item_metadata in item_metadatas
         ]
+
+        # TODO: get metadata_auto_fill from wk:metadataAutoFill
+        # TODO: get auto_fill_doi from ro-crate-metadata.json where "jpcoar:relation"
+
+        # Auto Fill Metadata
+        if metadata_auto_fill and auto_fill_doi is not None:
+            auto_filled_metadata = handle_doi(list_record[0], auto_fill_doi)
+            list_record[0]["metadata"] = auto_filled_metadata
+
         handle_index_tree_much_with_workflow(list_record, workflow)
         handle_file_save_as_is(file, data_path, filename)
 
